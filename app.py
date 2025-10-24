@@ -5,7 +5,7 @@ import base64
 import os
 import json
 from flask_cors import CORS
-import easyocr
+from paddleocr import PaddleOCR
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -19,8 +19,8 @@ cred = credentials.Certificate(cred_dict)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# ---------------- MODELS ----------------
-reader = easyocr.Reader(['en'])
+# ---------------- LAZY MODEL LOADERS ----------------
+ocr_model = None  # will initialize only when needed
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 smile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_smile.xml")
 eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
@@ -30,13 +30,12 @@ LABELS_FILE = "labels.npy"
 
 # ---------------- FACE UTILS ----------------
 def upload_to_firestore(image, name):
+    """Upload grayscale face image to Firestore as base64."""
     _, buffer = cv2.imencode('.png', image)
     img_base64 = base64.b64encode(buffer).decode('utf-8')
     doc_ref = db.collection('faces').document(name)
     doc_ref.set({'name': name}, merge=True)
-    db.collection('faces').document(name).collection('images').add({
-        'data': img_base64
-    })
+    db.collection('faces').document(name).collection('images').add({'data': img_base64})
     return f"Stored {name}'s face image in Firestore."
 
 def save_face(frame, name):
@@ -111,11 +110,22 @@ def detect_faces(frame):
             detected.append({"name": name, "emotion": emotion})
     return detected, None
 
-# ---------------- OCR ----------------
+# ---------------- OCR (PADDLE) ----------------
 def ocr_space_frame(frame):
+    global ocr_model
     try:
-        results = reader.readtext(frame)
-        text = " ".join([res[1] for res in results])
+        # Lazy-load PaddleOCR only when needed
+        if ocr_model is None:
+            print("🔹 Loading PaddleOCR model (this may take a few seconds)...")
+            ocr_model = PaddleOCR(use_angle_cls=False, lang='en', use_gpu=False)
+            print("✅ PaddleOCR loaded successfully.")
+        results = ocr_model.ocr(frame, cls=False)
+        texts = []
+        for res in results:
+            if res:
+                for line in res:
+                    texts.append(line[1][0])
+        text = " ".join(texts)
         return text.strip() or "No text detected"
     except Exception as e:
         return f"OCR failed: {str(e)}"
@@ -161,6 +171,6 @@ def health():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("🚀 Core Firebase + Face Server Running...")
+    print("🚀 Core Firebase + Face Server (PaddleOCR) Running...")
     print("=" * 50)
     app.run(host="0.0.0.0", port=5000)
