@@ -5,7 +5,6 @@ import base64
 import os
 import json
 from flask_cors import CORS
-from paddleocr import PaddleOCR
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -19,8 +18,7 @@ cred = credentials.Certificate(cred_dict)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# ---------------- LAZY MODEL LOADERS ----------------
-ocr_model = None  # will initialize only when needed
+# ---------------- FACE MODELS ----------------
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 smile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_smile.xml")
 eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
@@ -28,9 +26,8 @@ eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml
 TRAINER_FILE = "trainer.yml"
 LABELS_FILE = "labels.npy"
 
-# ---------------- FACE UTILS ----------------
+# ---------------- UTILS ----------------
 def upload_to_firestore(image, name):
-    """Upload grayscale face image to Firestore as base64."""
     _, buffer = cv2.imencode('.png', image)
     img_base64 = base64.b64encode(buffer).decode('utf-8')
     doc_ref = db.collection('faces').document(name)
@@ -110,29 +107,9 @@ def detect_faces(frame):
             detected.append({"name": name, "emotion": emotion})
     return detected, None
 
-# ---------------- OCR (PADDLE) ----------------
-def ocr_space_frame(frame):
-    global ocr_model
-    try:
-        # Lazy-load PaddleOCR only when needed
-        if ocr_model is None:
-            print("🔹 Loading PaddleOCR model (this may take a few seconds)...")
-            ocr_model = PaddleOCR(use_angle_cls=False, lang='en', use_gpu=False)
-            print("✅ PaddleOCR loaded successfully.")
-        results = ocr_model.ocr(frame, cls=False)
-        texts = []
-        for res in results:
-            if res:
-                for line in res:
-                    texts.append(line[1][0])
-        text = " ".join(texts)
-        return text.strip() or "No text detected"
-    except Exception as e:
-        return f"OCR failed: {str(e)}"
-
 # ---------------- ROUTES ----------------
-@app.route('/process_frame', methods=['POST'])
-def process_frame():
+@app.route('/process_face', methods=['POST'])
+def process_face():
     data = request.json
     image_b64 = data.get('frame', '')
     cmd = data.get('cmd', '').lower()
@@ -140,7 +117,6 @@ def process_frame():
 
     if ',' in image_b64:
         image_b64 = image_b64.split(',')[1]
-
     img_bytes = base64.b64decode(image_b64)
     np_arr = np.frombuffer(img_bytes, np.uint8)
     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -159,18 +135,17 @@ def process_frame():
             res = ". ".join([f"I found {f['name']}, looks {f['emotion']}" for f in faces]) + "."
         else:
             res = "No familiar faces detected."
-    elif "scan text" in cmd or "scan data" in cmd:
-        res = ocr_space_frame(frame)
     else:
-        res = "Command not recognized."
+        res = "Command not recognized for core server."
+
     return jsonify({"response": res})
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "core server running"})
+    return jsonify({"status": "core face server running"})
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("🚀 Core Firebase + Face Server (PaddleOCR) Running...")
+    print("🚀 Core Face + Firestore Server Running on Port 5000")
     print("=" * 50)
     app.run(host="0.0.0.0", port=5000)
